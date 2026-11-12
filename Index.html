@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>온라인 원카드 - Enhanced UI</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+body { background: radial-gradient(circle, #1b4d2e 0%, #0d2a18 70%, #05140b 100%); user-select: none; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+.card { width: 80px; height: 112px; border-radius: 10px; transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1); cursor: pointer; background: #ffffff; box-shadow: 0 6px 15px rgba(0,0,0,0.4); border: 2px solid #cbd5e1; flex-shrink: 0; position: relative; }
+.card:hover:not(.disabled) { transform: translateY(-10px) scale(1.03); box-shadow: 0 12px 25px rgba(0,0,0,0.5); }
+.card.playable { border-color: #f59e0b; box-shadow: 0 0 15px rgba(245, 158, 11, 0.6); transform: translateY(-6px); }
+.card.disabled { opacity: 0.45; filter: grayscale(30%); cursor: not-allowed; }
+.card-back { background: repeating-linear-gradient(45deg,#8a1818,#8a1818 10px,#6b1111 10px,#6b1111 20px); border: 3px solid #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+.card-joker { background: linear-gradient(135deg, #fef08a 0%, #fde047 50%, #facc15 100%); border: 2px solid #eab308; }
+.mini { width: 42px; height: 58px; border-radius: 6px; cursor: default; margin-left: -16px; border-width: 1px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); }
+.mini:hover { transform: none; }
+.zone { border: 2px dashed rgba(255,255,255,0.25); border-radius: 16px; background: rgba(0,0,0,0.25); backdrop-filter: blur(4px); }
+.rot180 { transform: rotate(180deg); }
+.text-red-suit { color: #dc2626 !important; }
+.text-black-suit { color: #1e293b !important; }
+/* 내 차례일 때 전체 화면 테두리 글로우 */
+.my-turn-glow { box-shadow: inset 0 0 30px rgba(245, 158, 11, 0.35); border: 2px solid rgba(245, 158, 11, 0.6); transition: all 0.3s ease; }
+</style>
+</head>
+<body id="main-container" class="h-screen w-screen text-white overflow-hidden">
+
+<!-- 로비 -->
+<div id="lobby" class="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4 backdrop-blur-md">
+  <div class="bg-gray-900 border border-amber-500/60 rounded-2xl p-7 w-full max-w-sm text-center space-y-4 shadow-2xl">
+    <div class="space-y-1">
+      <h1 class="text-2xl font-black text-amber-400 tracking-wider">온라인 원카드</h1>
+      <p class="text-xs text-gray-400">친구와 함께 즐기는 실시간 카드 대전</p>
+    </div>
+    <button onclick="createRoom()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 transition rounded-xl font-black text-sm shadow-lg shadow-emerald-900/40">방 만들기</button>
+    <div class="text-xs text-gray-500 font-medium">또는 코드로 입장</div>
+    <input id="code-in" maxlength="5" placeholder="방 코드 5자리" class="w-full p-3 rounded-xl bg-gray-800 text-center uppercase tracking-widest font-mono text-lg border border-gray-700 focus:border-amber-500 outline-none">
+    <button onclick="joinRoom()" class="w-full py-3 bg-amber-500 hover:bg-amber-400 transition text-black rounded-xl font-black text-sm shadow-lg shadow-amber-900/40">입장하기</button>
+    <div id="lobby-msg" class="text-xs text-amber-300 font-medium min-h-[20px]"></div>
+  </div>
+</div>
+
+<div class="h-full w-full flex flex-col justify-between p-4">
+  <!-- 상대 영역 -->
+  <div class="w-full flex flex-col items-center gap-1.5">
+    <div class="flex items-center gap-2.5 bg-black/80 px-5 py-1.5 rounded-full border border-white/15 text-xs shadow-md">
+      <span class="font-bold text-gray-300">상대방</span>
+      <span id="opp-cnt" class="bg-red-950 text-red-300 px-2.5 py-0.5 rounded-full font-mono font-bold border border-red-800/50">0장</span>
+      <span id="opp-badge" class="hidden bg-amber-400 text-black px-2.5 py-0.5 rounded-full font-black animate-pulse shadow">상대 차례</span>
+    </div>
+    <div id="opp-hand" class="zone min-h-[75px] w-full max-w-4xl flex items-center justify-center p-2 pl-6 overflow-hidden"></div>
+  </div>
+
+  <!-- 중앙 게임 플레이 영역 -->
+  <div class="flex-1 w-full max-w-4xl mx-auto flex flex-col justify-between items-center my-2">
+    <!-- 게임 상태 정보 바 -->
+    <div class="bg-black/80 px-6 py-2 rounded-2xl border border-white/20 flex items-center gap-5 text-xs shadow-lg backdrop-blur-sm">
+      <span>차례: <b id="turn-txt" class="text-amber-400 text-sm">-</b></span> 
+      <span class="text-white/20">|</span>
+      <span>현재 문양: <b id="suit-txt" class="text-lg">-</b></span> 
+      <span class="text-white/20">|</span>
+      <span>누적 공격: <b id="stack-txt" class="text-red-400 font-mono text-sm">0장</b></span> 
+      <span class="text-white/20">|</span>
+      <span>공격 유형: <b id="atk-txt" class="text-amber-300">없음</b></span>
+    </div>
+
+    <!-- 카드 더미 & 조작 버튼 -->
+    <div class="flex items-center justify-center gap-10 my-auto">
+      <!-- 덱 (카드 뽑기) -->
+      <div class="flex flex-col items-center gap-1.5">
+        <div onclick="act({t:'draw'})" class="card card-back flex items-center justify-center font-black text-xs text-white/90 hover:scale-105 transition cursor-pointer">DECK</div>
+        <span id="deck-cnt" class="text-xs text-emerald-300 font-bold font-mono">0장</span>
+      </div>
+
+      <!-- 중앙 버튼 및 메시지 -->
+      <div class="flex flex-col gap-2.5 items-center">
+        <button id="start-btn" onclick="act({t:'start'})" class="hidden px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 transition rounded-xl text-xs font-black shadow-xl animate-bounce">게임 시작</button>
+        <button id="pass-btn" onclick="act({t:'pass'})" class="hidden px-5 py-2 bg-amber-600 hover:bg-amber-500 transition rounded-xl text-xs font-black shadow-lg">턴 넘기기</button>
+        <div id="msg" class="text-xs text-amber-300 font-bold text-center min-h-[20px] max-w-[280px] bg-black/60 px-3 py-1 rounded-lg border border-amber-500/30"></div>
+      </div>
+
+      <!-- 바닥 (버려진 카드 더미) -->
+      <div class="flex flex-col items-center gap-1.5">
+        <div id="discard" class="zone w-[80px] h-[112px] flex items-center justify-center text-[11px] text-white/40 font-bold shadow-inner">DISCARD</div>
+        <span class="text-xs text-emerald-300 font-bold">바닥</span>
+      </div>
+    </div>
+
+    <!-- 규칙 요약 뱃지 -->
+    <div class="text-[11px] text-white/80 bg-black/50 px-4 py-1.5 rounded-full border border-white/15 flex gap-3 flex-wrap justify-center shadow">
+      <span><b>A(+5)</b>: A/JKR방어</span><span><b>2(+2)</b>: 2방어</span>
+      <span class="text-red-400 font-semibold"><b>JKR(+10)</b>: 조커방어</span><span><b>7</b>: 문양변경</span>
+      <span><b>J/Q/K</b>: 턴유지</span><span class="text-amber-400 font-bold"><b>26장 파산</b></span>
+    </div>
+  </div>
+
+  <!-- 내 영역 -->
+  <div class="w-full flex flex-col items-center gap-1.5">
+    <div id="my-hand" class="zone min-h-[125px] w-full max-w-4xl flex items-center justify-center gap-2 p-2 overflow-x-auto"></div>
+    <div class="flex items-center gap-2.5 bg-black/85 px-5 py-1.5 rounded-full border border-white/15 text-xs shadow-md">
+      <span class="font-bold text-emerald-400">내 손패</span>
+      <span id="my-cnt" class="bg-emerald-950 text-emerald-200 px-2.5 py-0.5 rounded-full font-mono font-bold border border-emerald-800/50">0장</span>
+      <span id="my-badge" class="hidden bg-amber-400 text-black px-2.5 py-0.5 rounded-full font-black animate-pulse shadow">내 차례!</span>
+    </div>
+  </div>
+</div>
+
+<!-- 문양 선택 모달 -->
+<div id="modal" class="hidden fixed inset-0 bg-black/85 z-40 flex items-center justify-center p-4 backdrop-blur-sm">
+  <div class="bg-gray-900 border border-amber-500/60 p-6 rounded-2xl text-center max-w-xs w-full shadow-2xl space-y-4">
+    <h3 class="text-sm font-black text-amber-400 tracking-wide">문양 변경 (숫자 7 발동)</h3>
+    <div class="grid grid-cols-2 gap-3">
+      <button onclick="act({t:'suit',s:'♠'})" class="p-3 bg-gray-800 hover:bg-gray-700 transition text-2xl text-black-suit rounded-xl border border-gray-700 shadow">♠</button>
+      <button onclick="act({t:'suit',s:'♥'})" class="p-3 bg-gray-800 hover:bg-gray-700 transition text-2xl text-red-suit rounded-xl border border-gray-700 shadow">♥</button>
+      <button onclick="act({t:'suit',s:'◆'})" class="p-3 bg-gray-800 hover:bg-gray-700 transition text-2xl text-red-suit rounded-xl border border-gray-700 shadow">◆</button>
+      <button onclick="act({t:'suit',s:'♣'})" class="p-3 bg-gray-800 hover:bg-gray-700 transition text-2xl text-black-suit rounded-xl border border-gray-700 shadow">♣</button>
+    </div>
+  </div>
+</div>
+
+<!-- 게임 종료 모달 -->
+<div id="end-modal" class="hidden fixed inset-0 bg-black/85 z-40 flex items-center justify-center p-4 backdrop-blur-sm">
+  <div class="bg-gray-900 border border-amber-500/60 p-6 rounded-2xl text-center max-w-xs w-full shadow-2xl space-y-4">
+    <h3 id="end-title" class="text-xl font-black text-amber-400"></h3>
+    <p id="end-desc" class="text-xs text-gray-300 leading-relaxed"></p>
+    <button onclick="act({t:'start'})" class="w-full py-3 bg-amber-500 hover:bg-amber-400 transition text-black font-extrabold rounded-xl text-xs shadow-lg shadow-amber-900/40">다시 시작하기</button>
+  </div>
+</div>
+
+<script>
+/* ===== 네트워크 (MQTT 공개 중계서버) ===== */
+let client=null, isHost=false, myNum=0, roomCode='', guestHere=false;
+const BROKERS=['wss://broker.hivemq.com:8884/mqtt','wss://broker.emqx.io:8084/mqtt'];
+const $ = id => document.getElementById(id);
+const lobbyMsg = t => $('lobby-msg').innerText = t;
+const rnd = () => Math.random().toString(36).slice(2, 7).toUpperCase().padEnd(5,'X');
+const T = s => `onecard-v2/${roomCode}/${s}`;
+const pub = (topic, obj, retain) => { if (client) client.publish(topic, JSON.stringify(obj), {qos:1, retain: !!retain}); };
+
+function connectMqtt(onReady) {
+  let i = 0;
+  const next = () => {
+    if (i >= BROKERS.length) return lobbyMsg('서버 연결 실패. 잠시 후 다시 시도');
+    lobbyMsg('서버 연결 중...');
+    const c = mqtt.connect(BROKERS[i++], {connectTimeout:6000, reconnectPeriod:0, clientId:'oc_'+Math.random().toString(16).slice(2)});
+    let settled = false;
+    const fail = () => { if (settled) return; settled = true; c.end(true); next(); };
+    const timer = setTimeout(fail, 7000);
+    c.on('error', fail);
+    c.on('connect', () => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      client = c; c.options.reconnectPeriod = 3000;
+      c.on('message', onMsg);
+      onReady();
+    });
+  };
+  next();
+}
+
+function createRoom() {
+  isHost = true; myNum = 1; roomCode = rnd();
+  connectMqtt(() => {
+    client.subscribe(T('host'), {qos:1}, () => {
+      pub(T('g'), {wait:true}, true);
+      lobbyMsg('방 코드: ' + roomCode + ' — 친구에게 알려주세요');
+    });
+  });
+}
+
+function joinRoom() {
+  const code = $('code-in').value.trim().toUpperCase();
+  if (code.length !== 5) return lobbyMsg('코드 5자리를 입력하세요');
+  isHost = false; myNum = 2; roomCode = code;
+  connectMqtt(() => {
+    let got = false;
+    client.subscribe(T('g'), {qos:1}, () => {
+      pub(T('host'), {t:'hello'});
+      setTimeout(() => { if (!got) lobbyMsg('방을 찾을 수 없어요'); }, 5000);
+    });
+    client._gotRef = () => { got = true; };
+  });
+}
+
+function onMsg(topic, payload) {
+  let m; try { m = JSON.parse(payload.toString()); } catch (e) { return; }
+  if (isHost && topic === T('host')) {
+    if (m.t === 'hello') {
+      if (!guestHere) {
+        guestHere = true;
+        $('lobby').classList.add('hidden');
+        $('msg').innerText = '상대 입장! 게임 시작을 눌러주세요.';
+        $('start-btn').classList.remove('hidden');
+      }
+      if (G) broadcast();
+    } else handle(2, m);
+  } else if (!isHost && topic === T('g')) {
+    if (client._gotRef) client._gotRef();
+    $('lobby').classList.add('hidden');
+    if (m.wait) { $('msg').innerText = '방장이 시작하길 기다리는 중...'; return; }
+    V = m; render();
+  }
+}
+
+function act(a) { if (isHost) handle(1, a); else pub(T('host'), a); }
+
+/* ===== 게임 로직 (방장 실행) ===== */
+const SUITS = [{s:'♠',c:'text-black-suit'},{s:'♥',c:'text-red-suit'},{s:'◆',c:'text-red-suit'},{s:'♣',c:'text-black-suit'}];
+const VALUES = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+let G = null;
+const other = p => p === 1 ? 2 : 1;
+
+function handle(p, a) {
+  if (a.t === 'start') return newGame();
+  if (!G || !G.active) return;
+  if (a.t === 'suit') return pickSuit(p, a.s);
+  if (G.await || p !== G.turn) return;
+  if (a.t === 'play') play(p, a.i);
+  else if (a.t === 'draw') draw(p);
+  else if (a.t === 'pass') pass(p);
+}
+
+function newGame() {
+  const deck = []; let id = 1;
+  SUITS.forEach(su => VALUES.forEach(v => deck.push({id:id++, isJk:false, s:su.s, c:su.c, v})));
+  deck.push({id:id++, isJk:true, s:'🃏', c:'text-red-suit', v:'RED JOKER'});
+  deck.push({id:id++, isJk:true, s:'🃏', c:'text-black-suit', v:'BLK JOKER'});
+  deck.sort(() => Math.random() - .5);
+  G = { deck, h:{1:[],2:[]}, top:null, suit:'', turn: Math.random()<.5?1:2, stack:0, atk:null, drewA:false, active:true, await:0, msg:'', end:null };
+  for (let i=0;i<5;i++){ G.h[1].push(deck.pop()); G.h[2].push(deck.pop()); }
+  while (true) {
+    const t = deck.pop();
+    if (t.isJk || ['A','2','7','J','Q','K'].includes(t.v)) { deck.unshift(t); deck.sort(()=>Math.random()-.5); }
+    else { G.top = t; break; }
+  }
+  G.suit = G.top.s;
+  G.msg = `게임 시작! Player ${G.turn} 선공.`;
+  $('start-btn').classList.add('hidden');
+  broadcast();
+}
+
+function isValid(c) {
+  if (G.stack > 0) {
+    if (G.atk === '2') return c.v === '2';
+    if (G.atk === 'JOKER') return c.isJk;
+    if (G.atk === 'A') return c.v === 'A' || c.isJk;
+    return false;
+  }
+  if (c.isJk || c.v === '7') return true;
+  return G.top.isJk || c.s === G.suit || c.v === G.top.v;
+}
+
+function play(p, i) {
+  const c = G.h[p][i];
+  if (!c) return;
+  if (!isValid(c)) { G.msg = '낼 수 없는 카드입니다!'; return broadcast(); }
+  G.h[p].splice(i, 1); G.top = c; G.drewA = false;
+  if (!c.isJk) G.suit = c.s;
+  let next = other(p), m7 = false;
+  if (c.v === 'A') { G.stack += 5; G.atk = 'A'; G.msg = 'A 공격 +5장!'; }
+  else if (c.v === '2') { G.stack += 2; G.atk = '2'; G.msg = '2 공격 +2장!'; }
+  else if (c.isJk) { G.stack += 10; G.atk = 'JOKER'; G.msg = '조커 공격 +10장!'; }
+  else if (c.v === '7') m7 = true;
+  else if (['J','Q','K'].includes(c.v)) { next = p; G.msg = `${c.v} 발동 (턴 유지)`; }
+  else G.msg = `Player ${p}가 ${c.v}를 냈습니다.`;
+  if (checkEnd(p)) return broadcast();
+  if (m7) { G.await = p; G.msg = `Player ${p}가 문양 선택 중...`; }
+  else G.turn = next;
+  broadcast();
+}
+
+function pickSuit(p, s) {
+  if (G.await !== p) return;
+  G.suit = s; G.await = 0; G.turn = other(p);
+  G.msg = `문양 변경: ${s}. Player ${G.turn} 차례!`;
+  broadcast();
+}
+
+function draw(p) {
+  const hand = G.h[p];
+  const n = G.stack > 0 ? G.stack : 1, type = G.atk;
+  for (let i=0;i<n;i++) {
+    if (!G.deck.length) { G.active = false; G.end = {title:'덱 소진', desc:'무승부!'}; return broadcast(); }
+    hand.push(G.deck.pop());
+  }
+  if (G.stack > 0) {
+    G.stack = 0; G.atk = null;
+    if (checkEnd(p)) return broadcast();
+    if (type === 'A') { G.drewA = true; G.msg = `A 벌칙 획득! 카드를 내거나 턴 넘기기`; }
+    else { G.turn = other(p); G.drewA = false; G.msg = '벌칙 카드 획득 후 턴 패스!'; }
+  } else {
+    G.drewA = false;
+    if (checkEnd(p)) return broadcast();
+    G.turn = other(p); G.msg = '덱에서 1장 뽑고 턴 종료.';
+  }
+  broadcast();
+}
+
+function pass(p) {
+  if (!G.drewA) return;
+  G.drewA = false; G.turn = other(p); G.msg = '턴을 넘겼습니다.';
+  broadcast();
+}
+
+function checkEnd(p) {
+  const opp = other(p), n = G.h[p].length;
+  if (n === 0) { G.active = false; G.end = {title:`PLAYER ${p} 승리!`, desc:'모든 손패를 털었습니다!'}; return true; }
+  if (n >= 26) { G.active = false; G.end = {title:`PLAYER ${opp} 승리! (파산)`, desc:'손패가 26장이 되어 파산했습니다!'}; return true; }
+  return false;
+}
+
+function viewFor(p) {
+  return { me:p, myHand:G.h[p], oppCount:G.h[other(p)].length, deckCnt:G.deck.length, top:G.top, suit:G.suit,
+           turn:G.turn, stack:G.stack, atk:G.atk, drewA:G.drewA, active:G.active, await:G.await, msg:G.msg, end:G.end };
+}
+function broadcast() {
+  V = viewFor(1); render();
+  pub(T('g'), viewFor(2), true);
+}
+
+/* ===== 화면 렌더링 ===== */
+let V = null;
+
+function checkPlayable(c, top, stack, atk, suit) {
+  if (stack > 0) {
+    if (atk === '2') return c.v === '2';
+    if (atk === 'JOKER') return c.isJk;
+    if (atk === 'A') return c.v === 'A' || c.isJk;
+    return false;
+  }
+  if (c.isJk || c.v === '7') return true;
+  return top.isJk || c.s === suit || c.v === top.v;
+}
+
+function cardEl(c, onclick, mini, isPlayable) {
+  const el = document.createElement('div');
+  if (!c) { 
+    el.className = 'card card-back' + (mini ? ' mini' : ''); 
+    return el; 
+  }
+  
+  if (c.isJk) {
+    el.className = `card card-joker flex flex-col justify-between p-2 ${mini ? 'mini' : ''} ${isPlayable ? 'playable' : (onclick ? 'disabled' : '')}`;
+    el.innerHTML = `
+      <div class="flex flex-col leading-none ${c.c}"><span class="text-xs font-black">JK</span><span class="text-xs">🃏</span></div>
+      <div class="text-center text-2xl ${c.c} my-auto animate-pulse">🃏</div>
+      <div class="flex flex-col leading-none ${c.c} rot180 items-end"><span class="text-xs font-black">JK</span><span class="text-xs">🃏</span></div>`;
+  } else {
+    el.className = `card flex flex-col justify-between p-2 ${mini ? 'mini' : ''} ${isPlayable ? 'playable' : (onclick ? 'disabled' : '')}`;
+    el.innerHTML = `
+      <div class="flex flex-col leading-none ${c.c}"><span class="text-xs font-black">${c.v}</span><span class="text-xs">${c.s}</span></div>
+      <div class="text-center text-xl font-bold ${c.c} my-auto">${c.s}</div>
+      <div class="flex flex-col leading-none ${c.c} rot180 items-end"><span class="text-xs font-black">${c.v}</span><span class="text-xs">${c.s}</span></div>`;
+  }
+  if (onclick && isPlayable) el.onclick = onclick;
+  return el;
+}
+
+function render() {
+  const mh = $('my-hand'), oh = $('opp-hand'), ds = $('discard');
+  mh.innerHTML = ''; oh.innerHTML = ''; ds.innerHTML = '';
+  if (!V) return;
+
+  const mine = V.active && V.turn === V.me;
+
+  // 내 손패 렌더링 (낼 수 있는 카드 하이라이트 적용)
+  V.myHand.forEach((c, i) => {
+    const playable = mine && !V.await && checkPlayable(c, V.top, V.stack, V.atk, V.suit);
+    mh.appendChild(cardEl(c, () => act({t:'play', i}), false, playable));
+  });
+
+  // 상대 손패 (뒷면)
+  for (let i=0;i<V.oppCount;i++) oh.appendChild(cardEl(null, null, true));
+
+  // 바닥 카드
+  if (V.top) ds.appendChild(cardEl(V.top));
+
+  // 텍스트 및 상태 업데이트
+  $('my-cnt').innerText = V.myHand.length + '장';
+  $('opp-cnt').innerText = V.oppCount + '장';
+  $('deck-cnt').innerText = V.deckCnt + '장';
+  $('turn-txt').innerText = !V.active ? '-' : (mine ? '내 차례!' : '상대 차례');
+
+  const st = $('suit-txt'); 
+  st.innerText = V.suit || '-';
+  st.className = (V.suit==='♥'||V.suit==='◆') ? 'text-lg text-red-suit font-black' : 'text-lg text-white font-black';
+
+  $('stack-txt').innerText = V.stack + '장';
+  $('stack-txt').className = V.stack > 0 ? 'text-red-400 font-mono text-sm font-black animate-pulse' : 'text-red-400 font-mono text-sm';
+  
+  $('atk-txt').innerText = V.atk || '없음';
+
+  // 배지 및 버튼 토글
+  $('my-badge').classList.toggle('hidden', !mine);
+  $('opp-badge').classList.toggle('hidden', !(V.active && V.turn !== V.me));
+  $('pass-btn').classList.toggle('hidden', !(mine && V.drewA && !V.await));
+  $('msg').innerText = V.msg;
+  $('modal').classList.toggle('hidden', V.await !== V.me);
+  $('end-modal').classList.toggle('hidden', !V.end);
+  
+  if (V.end) { 
+    $('end-title').innerText = V.end.title; 
+    $('end-desc').innerText = V.end.desc; 
+  }
+
+  // 내 차례일 때 전체 화면 테두리 글로우 효과 적용
+  $('main-container').classList.toggle('my-turn-glow', mine);
+}
+</script>
+</body>
+</html>
